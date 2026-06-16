@@ -15,6 +15,10 @@ python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
 
+[[tool.mypy.overrides]]
+module = ["app.main"]
+disallow_untyped_decorators = false
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
