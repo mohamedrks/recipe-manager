@@ -13,8 +13,10 @@ from app.core.security import decode_token
 from app.db.redis import redis_client
 from app.db.session import AsyncSessionLocal
 from app.models.user import User
+from app.repositories.recipe_repository import RecipeRepository
 from app.repositories.user_repository import UserRepository
 from app.services.auth_service import AuthService
+from app.services.recipe_service import RecipeService
 
 bearer_scheme = HTTPBearer()
 
@@ -38,6 +40,12 @@ async def get_auth_service(
     redis: Annotated[aioredis.Redis, Depends(get_redis)],
 ) -> AuthService:
     return AuthService(UserRepository(session), redis)
+
+
+async def get_recipe_service(
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> RecipeService:
+    return RecipeService(RecipeRepository(session))
 
 
 async def get_current_user(

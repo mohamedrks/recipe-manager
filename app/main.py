@@ -6,6 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.api.v1.routers.auth import router as auth_router
+from app.api.v1.routers.recipes import router as recipes_router
 from app.core.config import settings
 from app.core.exceptions import (
     ConflictException,
@@ -59,6 +60,7 @@ async def forbidden_handler(request: Request, exc: ForbiddenException) -> JSONRe
 
 
 app.include_router(auth_router, prefix="/api/v1")
+app.include_router(recipes_router, prefix="/api/v1")
 
 
 @app.get("/health/live", tags=["Health"])
