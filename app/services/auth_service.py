@@ -14,7 +14,7 @@ from app.core.security import (
     verify_password,
 )
 from app.repositories.user_repository import UserRepository
-from app.schemas.auth import Token, UserCreate, UserOut
+from app.schemas.auth import TokenResponse, UserRegisterRequest, UserResponse
 
 
 class AuthService:
@@ -22,25 +22,25 @@ class AuthService:
         self.user_repo = user_repo
         self.redis = redis
 
-    async def register(self, payload: UserCreate) -> UserOut:
+    async def register(self, payload: UserRegisterRequest) -> UserResponse:
         if await self.user_repo.get_by_email(payload.email):
             raise ConflictException("Email already registered")
         user = await self.user_repo.create(
             email=payload.email,
             hashed_password=hash_password(payload.password),
         )
-        return UserOut.model_validate(user)
+        return UserResponse.model_validate(user)
 
-    async def login(self, email: str, password: str) -> Token:
+    async def login(self, email: str, password: str) -> TokenResponse:
         user = await self.user_repo.get_by_email(email)
         if not user or not verify_password(password, user.hashed_password):
             raise UnauthorizedException("Invalid credentials")
-        return Token(
+        return TokenResponse(
             access_token=create_access_token(str(user.id)),
             refresh_token=create_refresh_token(str(user.id)),
         )
 
-    async def refresh(self, refresh_token: str) -> Token:
+    async def refresh(self, refresh_token: str) -> TokenResponse:
         payload = self._decode_or_raise(refresh_token)
         if payload.get("type") != "refresh":
             raise UnauthorizedException("Invalid token type")
@@ -48,7 +48,7 @@ class AuthService:
             raise UnauthorizedException("Token has been revoked")
         user_id: str = payload["sub"]
         await self._blacklist(refresh_token, payload)
-        return Token(
+        return TokenResponse(
             access_token=create_access_token(user_id),
             refresh_token=create_refresh_token(user_id),
         )
