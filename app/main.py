@@ -5,6 +5,7 @@ import structlog
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from app.api.v1.routers.auth import router as auth_router
 from app.core.config import settings
 from app.core.exceptions import (
     ConflictException,
@@ -55,6 +56,9 @@ async def not_found_handler(request: Request, exc: NotFoundException) -> JSONRes
 @app.exception_handler(ForbiddenException)
 async def forbidden_handler(request: Request, exc: ForbiddenException) -> JSONResponse:
     return JSONResponse(status_code=403, content={"detail": exc.detail})
+
+
+app.include_router(auth_router, prefix="/api/v1")
 
 
 @app.get("/health/live", tags=["Health"])

@@ -7,7 +7,7 @@ import pytest
 from app.core.exceptions import ConflictException, UnauthorizedException
 from app.core.security import create_refresh_token, hash_password
 from app.models.user import User
-from app.schemas.auth import UserCreate
+from app.schemas.auth import UserRegisterRequest
 from app.services.auth_service import AuthService
 
 
@@ -40,14 +40,18 @@ def make_service(
 
 async def test_register_new_user() -> None:
     service = make_service(user=None)
-    result = await service.register(UserCreate(email="new@example.com", password="SecurePass123"))
+    result = await service.register(
+        UserRegisterRequest(email="new@example.com", password="SecurePass123")
+    )
     assert result.email == make_user().email
 
 
 async def test_register_duplicate_email_raises() -> None:
     service = make_service(user=make_user())
     with pytest.raises(ConflictException) as exc:
-        await service.register(UserCreate(email="user@example.com", password="SecurePass123"))
+        await service.register(
+            UserRegisterRequest(email="user@example.com", password="SecurePass123")
+        )
     assert exc.value.detail == "Email already registered"
 
 

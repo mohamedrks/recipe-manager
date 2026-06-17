@@ -3,25 +3,30 @@ import uuid
 from pydantic import BaseModel, EmailStr, Field
 
 
-class UserCreate(BaseModel):
+class UserRegisterRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=100)
 
 
-class UserOut(BaseModel):
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class UserResponse(BaseModel):
     id: uuid.UUID
     email: str
 
     model_config = {"from_attributes": True}
 
 
-class Token(BaseModel):
+class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
 
 
-class TokenRefresh(BaseModel):
+class TokenRefreshRequest(BaseModel):
     refresh_token: str
 
 
