@@ -21,6 +21,10 @@ exclude = ["alembic/"]
 module = ["app.main"]
 disallow_untyped_decorators = false
 
+[[tool.mypy.overrides]]
+module = ["passlib.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
