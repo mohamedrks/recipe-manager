@@ -3,9 +3,14 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, status
 
-from app.api.v1.deps import get_current_user, get_recipe_service
+from app.api.v1.deps import get_current_user, get_recipe_filters, get_recipe_service
 from app.models.user import User
-from app.schemas.recipe import RecipeCreateRequest, RecipeResponse, RecipeUpdateRequest
+from app.schemas.recipe import (
+    RecipeCreateRequest,
+    RecipeFilters,
+    RecipeResponse,
+    RecipeUpdateRequest,
+)
 from app.services.recipe_service import RecipeService
 
 router = APIRouter(prefix="/recipes", tags=["Recipes"])
@@ -24,8 +29,9 @@ async def create_recipe(
 async def list_recipes(
     service: Annotated[RecipeService, Depends(get_recipe_service)],
     current_user: Annotated[User, Depends(get_current_user)],
+    filters: Annotated[RecipeFilters, Depends(get_recipe_filters)],
 ) -> list[RecipeResponse]:
-    return await service.list_recipes(current_user)
+    return await service.list_recipes(current_user, filters)
 
 
 @router.get("/{recipe_id}", response_model=RecipeResponse)

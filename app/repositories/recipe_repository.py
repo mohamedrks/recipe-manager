@@ -1,13 +1,13 @@
 import uuid
 
-from sqlalchemy import Select, delete, select
+from sqlalchemy import Select, delete, exists, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.ingredient import Ingredient
 from app.models.recipe import Recipe, RecipeIngredient
-from app.schemas.recipe import IngredientIn, RecipeCreateRequest
+from app.schemas.recipe import IngredientIn, RecipeCreateRequest, RecipeFilters
 
 
 class RecipeRepository:
@@ -35,10 +35,54 @@ class RecipeRepository:
         recipe: Recipe | None = result.scalar_one_or_none()
         return recipe
 
-    async def list_by_owner(self, owner_id: uuid.UUID) -> list[Recipe]:
-        result = await self.session.execute(
+    async def list_by_owner(self, owner_id: uuid.UUID, filters: RecipeFilters) -> list[Recipe]:
+        query = (
             self._base_query().where(Recipe.owner_id == owner_id).order_by(Recipe.created_at.desc())
         )
+
+        if filters.is_vegetarian is not None:
+            query = query.where(Recipe.is_vegetarian == filters.is_vegetarian)
+
+        if filters.servings is not None:
+            query = query.where(Recipe.servings == filters.servings)
+
+        for name in filters.include_ingredients:
+            norm = name.strip().lower()
+            query = query.where(
+                exists(
+                    select(RecipeIngredient.recipe_id)
+                    .join(Ingredient, RecipeIngredient.ingredient_id == Ingredient.id)
+                    .where(
+                        RecipeIngredient.recipe_id == Recipe.id,
+                        Ingredient.name == norm,
+                    )
+                )
+            )
+
+        for name in filters.exclude_ingredients:
+            norm = name.strip().lower()
+            query = query.where(
+                ~exists(
+                    select(RecipeIngredient.recipe_id)
+                    .join(Ingredient, RecipeIngredient.ingredient_id == Ingredient.id)
+                    .where(
+                        RecipeIngredient.recipe_id == Recipe.id,
+                        Ingredient.name == norm,
+                    )
+                )
+            )
+
+        if filters.instructions_contains:
+            query = query.where(
+                func.to_tsvector("english", Recipe.instructions).op("@@")(
+                    func.plainto_tsquery("english", filters.instructions_contains)
+                )
+            )
+
+        offset = (filters.page - 1) * filters.page_size
+        query = query.offset(offset).limit(filters.page_size)
+
+        result = await self.session.execute(query)
         recipes: list[Recipe] = list(result.scalars().all())
         return recipes
 

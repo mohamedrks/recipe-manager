@@ -3,7 +3,12 @@ import uuid
 from app.core.exceptions import NotFoundException
 from app.models.user import User
 from app.repositories.recipe_repository import RecipeRepository
-from app.schemas.recipe import RecipeCreateRequest, RecipeResponse, RecipeUpdateRequest
+from app.schemas.recipe import (
+    RecipeCreateRequest,
+    RecipeFilters,
+    RecipeResponse,
+    RecipeUpdateRequest,
+)
 
 
 class RecipeService:
@@ -20,8 +25,8 @@ class RecipeService:
             raise NotFoundException("Recipe not found")
         return RecipeResponse.model_validate(recipe)
 
-    async def list_recipes(self, owner: User) -> list[RecipeResponse]:
-        recipes = await self.repo.list_by_owner(owner.id)
+    async def list_recipes(self, owner: User, filters: RecipeFilters) -> list[RecipeResponse]:
+        recipes = await self.repo.list_by_owner(owner.id, filters)
         return [RecipeResponse.model_validate(r) for r in recipes]
 
     async def update(
