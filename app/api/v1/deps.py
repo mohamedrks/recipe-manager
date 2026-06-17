@@ -4,7 +4,7 @@ from typing import Annotated
 
 import jwt
 import redis.asyncio as aioredis
-from fastapi import Depends
+from fastapi import Depends, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +15,7 @@ from app.db.session import AsyncSessionLocal
 from app.models.user import User
 from app.repositories.recipe_repository import RecipeRepository
 from app.repositories.user_repository import UserRepository
+from app.schemas.recipe import RecipeFilters
 from app.services.auth_service import AuthService
 from app.services.recipe_service import RecipeService
 
@@ -46,6 +47,26 @@ async def get_recipe_service(
     session: Annotated[AsyncSession, Depends(get_db)],
 ) -> RecipeService:
     return RecipeService(RecipeRepository(session))
+
+
+async def get_recipe_filters(
+    is_vegetarian: bool | None = None,
+    servings: int | None = None,
+    include_ingredients: Annotated[list[str] | None, Query()] = None,
+    exclude_ingredients: Annotated[list[str] | None, Query()] = None,
+    instructions_contains: str | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+) -> RecipeFilters:
+    return RecipeFilters(
+        is_vegetarian=is_vegetarian,
+        servings=servings,
+        include_ingredients=include_ingredients or [],
+        exclude_ingredients=exclude_ingredients or [],
+        instructions_contains=instructions_contains,
+        page=page,
+        page_size=page_size,
+    )
 
 
 async def get_current_user(

@@ -49,3 +49,13 @@ class RecipeResponse(BaseModel):
     ingredients: list[IngredientResponse] = []
 
     model_config = {"from_attributes": True}
+
+
+class RecipeFilters(BaseModel):
+    is_vegetarian: bool | None = None
+    servings: int | None = None
+    include_ingredients: list[str] = []
+    exclude_ingredients: list[str] = []
+    instructions_contains: str | None = None
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=20, ge=1, le=100)
