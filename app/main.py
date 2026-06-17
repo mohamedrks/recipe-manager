@@ -2,9 +2,16 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from app.core.config import settings
+from app.core.exceptions import (
+    ConflictException,
+    ForbiddenException,
+    NotFoundException,
+    UnauthorizedException,
+)
 from app.core.logging import setup_logging
 from app.db.session import engine
 
@@ -28,6 +35,26 @@ app = FastAPI(
     redoc_url="/redoc",
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(ConflictException)
+async def conflict_handler(request: Request, exc: ConflictException) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": exc.detail})
+
+
+@app.exception_handler(UnauthorizedException)
+async def unauthorized_handler(request: Request, exc: UnauthorizedException) -> JSONResponse:
+    return JSONResponse(status_code=401, content={"detail": exc.detail})
+
+
+@app.exception_handler(NotFoundException)
+async def not_found_handler(request: Request, exc: NotFoundException) -> JSONResponse:
+    return JSONResponse(status_code=404, content={"detail": exc.detail})
+
+
+@app.exception_handler(ForbiddenException)
+async def forbidden_handler(request: Request, exc: ForbiddenException) -> JSONResponse:
+    return JSONResponse(status_code=403, content={"detail": exc.detail})
 
 
 @app.get("/health/live", tags=["Health"])
