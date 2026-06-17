@@ -14,6 +14,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+from app.models.ingredient import Ingredient
 
 
 class RecipeIngredient(Base):
@@ -25,6 +26,8 @@ class RecipeIngredient(Base):
     ingredient_id: Mapped[int] = mapped_column(ForeignKey("ingredients.id"), primary_key=True)
     quantity: Mapped[str | None] = mapped_column(String(50), nullable=True)
     unit: Mapped[str | None] = mapped_column(String(30), nullable=True)
+
+    ingredient: Mapped["Ingredient"] = relationship("Ingredient", lazy="selectin")
 
     __table_args__ = (Index("ix_recipe_ingredients_ingredient_id", "ingredient_id"),)
 
