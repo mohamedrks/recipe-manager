@@ -1,8 +1,9 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 
 from app.api.v1.deps import get_auth_service, get_current_user
+from app.core.limiter import limiter
 from app.models.user import User
 from app.schemas.auth import (
     LoginRequest,
@@ -17,7 +18,9 @@ router = APIRouter(prefix="/auth", tags=["Auth"])
 
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit("10/minute")
 async def register(
+    request: Request,
     payload: UserRegisterRequest,
     service: Annotated[AuthService, Depends(get_auth_service)],
 ) -> UserResponse:
@@ -25,7 +28,9 @@ async def register(
 
 
 @router.post("/login", response_model=TokenResponse)
+@limiter.limit("10/minute")
 async def login(
+    request: Request,
     payload: LoginRequest,
     service: Annotated[AuthService, Depends(get_auth_service)],
 ) -> TokenResponse:
