@@ -45,6 +45,13 @@ async def client() -> AsyncGenerator[AsyncClient, None]:
 
 
 @pytest.fixture(autouse=True)
+def reset_rate_limiter():
+    from app.core.limiter import limiter
+
+    limiter.reset()
+
+
+@pytest.fixture(autouse=True)
 async def clean_db() -> AsyncGenerator[None, None]:
     yield
     async with _test_engine.begin() as conn:
