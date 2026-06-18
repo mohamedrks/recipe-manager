@@ -80,7 +80,7 @@ graph TD
     subgraph API_Layer["API Layer (FastAPI routers + Pydantic schemas)"]
         R1["Auth Router (/api/v1/auth)"]
         R2["Recipes Router (/api/v1/recipes)"]
-        R3["Health Router (/health, /metrics)"]
+        R3["Health Router (/health/live, /health/ready, /health/metrics)"]
     end
     subgraph Service_Layer["Service Layer (business logic)"]
         S1["AuthService"]
@@ -88,8 +88,7 @@ graph TD
     end
     subgraph Repository_Layer["Repository Layer (data access)"]
         Rp1["UserRepository"]
-        Rp2["RecipeRepository"]
-        Rp3["IngredientRepository"]
+        Rp2["RecipeRepository<br/>(also owns ingredient upsert)"]
     end
     subgraph Infra["Cross-cutting Infrastructure"]
         DBSession["Async DB Session / Engine"]
@@ -103,12 +102,12 @@ graph TD
     S1 --> Rp1
     S1 --> Security
     S2 --> Rp2
-    S2 --> Rp3
     Rp1 --> DBSession
     Rp2 --> DBSession
-    Rp3 --> DBSession
     DBSession --> PG[("PostgreSQL")]
 ```
+
+> Implementation note: there is no separate `IngredientRepository` class — ingredient get-or-create/upsert logic lives inside `RecipeRepository._replace_ingredients`.
 
 ## 5. Data Model (ER Diagram)
 
@@ -128,6 +127,7 @@ erDiagram
         uuid id PK
         uuid owner_id FK
         string title
+        text description
         text instructions
         int servings
         bool is_vegetarian
@@ -243,12 +243,12 @@ sequenceDiagram
 | POST | `/api/v1/auth/logout` | Revoke refresh token (Redis blacklist) | Yes |
 | POST | `/api/v1/recipes` | Create recipe | Yes |
 | GET | `/api/v1/recipes/{id}` | Fetch single recipe | Yes |
-| PUT | `/api/v1/recipes/{id}` | Update recipe | Yes |
+| PATCH | `/api/v1/recipes/{id}` | Update recipe | Yes |
 | DELETE | `/api/v1/recipes/{id}` | Delete recipe | Yes |
 | GET | `/api/v1/recipes` | List/filter recipes (query params below) | Yes |
 | GET | `/health/live` | Liveness probe | No |
 | GET | `/health/ready` | Readiness probe (DB check) | No |
-| GET | `/metrics` | Prometheus metrics | No (internal network) |
+| GET | `/health/metrics` | Prometheus metrics | No (not network-restricted) |
 
 `GET /api/v1/recipes` query params (all optional, combinable with AND):
 `is_vegetarian`, `servings`, `include_ingredients` (repeatable), `exclude_ingredients` (repeatable), `instructions_contains`, `page`, `page_size`.
@@ -260,16 +260,16 @@ Full API documented automatically via FastAPI's OpenAPI schema → Swagger UI (`
 ## 8. Concurrency, Parallelism & Thread Safety
 
 - **Async I/O**: All endpoints async; SQLAlchemy 2.0 async engine + `asyncpg` driver + connection pool → high concurrency for DB-bound requests without blocking the event loop.
-- **Multi-core**: Uvicorn run with multiple worker processes (`WEB_CONCURRENCY` env var), each with its own connection pool — scales across CPU cores in a single container, and horizontally via multiple container replicas behind the reverse proxy.
-- **Statelessness / thread safety**: No shared mutable in-process state. Per-request dependencies (DB session, current user) injected via FastAPI `Depends`. Any cross-instance shared state (rate-limit counters, revoked-token blacklist) lives in Redis, not in-process memory — avoids race conditions across workers/replicas.
-- **Local 2-instance demo**: the docker-compose stack runs two identical `api-1`/`api-2` containers behind `nginx` (see §13). This isn't just for show — it's a live test of the statelessness claim above: if rate limiting or token revocation were ever implemented with in-process memory, requests round-robined between the two instances would behave inconsistently. Running two instances locally catches that class of bug before it reaches production.
+- **Multi-core**: planned but not implemented in this delivery — the `Dockerfile` runs a single `uvicorn` process with no `--workers`/`WEB_CONCURRENCY` configured. Scaling across cores would mean adding worker processes (or Gunicorn-managed Uvicorn workers); scaling across machines would mean the replica topology described below.
+- **Statelessness / thread safety**: No shared mutable in-process state. Per-request dependencies (DB session, current user) injected via FastAPI `Depends`. The JWT revocation blacklist lives in Redis, not in-process memory, so it would survive correctly across replicas. **Caveat**: the rate limiter (`app/core/limiter.py`) currently uses `slowapi`'s in-memory store (`storage_uri="memory://"`), which is *not* yet cross-instance-safe — see §9.
+- **Local 2-instance demo**: designed (see §13) but not implemented in this delivery — the running stack is a single `api` instance behind no reverse proxy. The nginx/2-replica topology remains a documented next step, not a live demo today.
 - **CPU-bound work** (none required by current spec, but documented for future): would use `run_in_executor` with a `ProcessPoolExecutor`, or an external worker (Celery/RQ + Redis) if heavy async background jobs are needed later — **not included in initial scope** to avoid over-engineering.
 
 ### Transaction Management & Atomicity
 
 - **Unit of work**: one `AsyncSession` per HTTP request, injected via dependency. Represents a single DB transaction for that request.
 - **Multi-step writes wrapped atomically**:
-  - *Create recipe*: insert `recipes` row, upsert each ingredient (`INSERT ... ON CONFLICT (name) DO NOTHING`), insert `recipe_ingredients` rows — all within `async with session.begin():`. Any failure rolls back the whole operation, so no orphaned recipe or partial ingredient list is ever persisted.
+  - *Create recipe*: insert `recipes` row, upsert each ingredient (`INSERT ... ON CONFLICT (name) DO NOTHING`), insert `recipe_ingredients` rows — all within the same request-scoped `AsyncSession` (no explicit nested `session.begin()`; the `get_db` dependency commits once at the end of the request, or rolls back the whole session on any unhandled exception). Any failure rolls back the whole operation, so no orphaned recipe or partial ingredient list is ever persisted.
   - *Update recipe*: update scalar fields and replace ingredient associations (delete old `recipe_ingredients`, insert new) in the same transaction — avoids a visible intermediate state with zero/duplicate ingredients.
   - *Delete recipe*: `recipe_ingredients.recipe_id` FK uses `ON DELETE CASCADE`, so deleting the recipe row atomically removes associations at the DB level.
 - **Concurrent ingredient creation**: the "get-or-create ingredient" race (two requests creating "potatoes" simultaneously) is resolved with Postgres `INSERT ... ON CONFLICT (name) DO NOTHING` — atomic upsert, no app-level locking.
@@ -282,12 +282,12 @@ Full API documented automatically via FastAPI's OpenAPI schema → Swagger UI (`
 
 - Password hashing: `passlib[argon2]`.
 - JWT access tokens (short-lived, ~15 min) + refresh tokens (~7 days), signed with a secret from env/secrets manager; refresh tokens revocable via Redis blacklist on logout.
-- Authorization: every recipe operation checks `recipe.owner_id == current_user.id` (403/404 otherwise).
+- Authorization: every recipe query is scoped by `WHERE owner_id = current_user.id` at the repository level (`RecipeRepository.get_by_id`), so a non-owner gets 404, not 403 — the API never reveals that a recipe exists if you don't own it.
 - Input validation: strict Pydantic v2 schemas (length limits, enums, types) — mitigates injection and malformed-payload issues.
 - SQL injection prevented by SQLAlchemy parameterized queries (no raw string interpolation).
-- Rate limiting via `slowapi` (Redis backend), tighter limits on `/auth/*`.
-- CORS configured via env-driven allow-list.
-- Security headers middleware (HSTS, X-Content-Type-Options, X-Frame-Options, etc.) — HSTS only meaningful behind TLS-terminating proxy in prod.
+- Rate limiting via `slowapi` on `/auth/register` and `/auth/login` (10/minute). **Current backend is in-memory** (`storage_uri="memory://"` in `app/core/limiter.py`), which is correct for a single instance but would need to move to a Redis-backed store before running multiple replicas (§8) — otherwise each instance enforces its own independent limit.
+- CORS configured via env-driven allow-list (`CORSMiddleware` in `app/main.py`, origins from `settings.cors_origins`). **Implemented.**
+- Security headers middleware (HSTS, X-Content-Type-Options, X-Frame-Options, etc.) — **not implemented.** Planned but no `SecurityHeadersMiddleware` exists in `app/core/middleware.py` yet.
 - Secrets via environment variables / `.env` (never committed) — `.env.example` provided.
 - Dependency vulnerability scanning (`pip-audit`) wired into CI.
 
@@ -296,14 +296,14 @@ Full API documented automatically via FastAPI's OpenAPI schema → Swagger UI (`
 ## 10. Observability
 
 - **Logging**: `structlog` → structured JSON logs to stdout, including request ID (generated/propagated via middleware), user ID, latency, status code.
-- **Metrics**: `prometheus-fastapi-instrumentator` exposes `/metrics` (request rate, latency histograms, in-flight requests, error rates). Local docker-compose includes Prometheus (scrapes the app) + Grafana (pre-provisioned dashboard).
+- **Metrics**: hand-rolled `prometheus_client` `Counter`/`Histogram` inside `RequestLoggingMiddleware` (`app/core/middleware.py`), exposed at `GET /health/metrics` via a small endpoint in `health.py` (request count by method/path/status, request duration histogram). Not the `prometheus-fastapi-instrumentator` package — that's not a dependency. **Prometheus + Grafana containers are not implemented** — the metrics endpoint exists and is scrape-ready, but nothing currently scrapes it locally.
 - **Health checks**: `/health/live` (process up) and `/health/ready` (DB connectivity), used by Docker healthchecks/orchestrator probes.
 
 ---
 
 ## 11. Testing Strategy
 
-- **Unit tests** (`pytest`, `pytest-asyncio`): service-layer business logic with mocked repositories, Pydantic schema validation, security utilities (hashing/JWT), and the recipe-filter query-builder logic in isolation. Fast, run against SQLite in-memory where a DB is needed.
+- **Unit tests** (`pytest`, `pytest-asyncio`): service-layer business logic with mocked repositories, Pydantic schema validation, and security utilities (hashing/JWT) — no real database involved, repositories are mocked rather than backed by SQLite. The recipe-filter query-builder logic is exercised only via integration tests (it relies on Postgres-specific SQL: `EXISTS`, `to_tsvector`), not as an isolated unit test.
 - **Integration tests**: `httpx.AsyncClient` against the real FastAPI app + a real PostgreSQL instance (docker-compose test service or `testcontainers-python`). Covers full auth flow + recipe CRUD + the exact filter combinations from the spec (vegetarian-only, servings=4 + "potatoes", exclude "salmon" + "oven" in instructions).
 - **Coverage**: `pytest-cov`, enforced threshold in CI (e.g. ≥80%).
 - **Quality gates**: `ruff` (lint+format), `mypy` (type checking), pre-commit hooks.
@@ -311,6 +311,8 @@ Full API documented automatically via FastAPI's OpenAPI schema → Swagger UI (`
 ---
 
 ## 12. Project Structure
+
+Actual structure as implemented:
 
 ```
 recipe-manager/
@@ -320,41 +322,44 @@ recipe-manager/
 │   │   ├── config.py            # pydantic-settings, env-driven
 │   │   ├── security.py          # JWT, password hashing
 │   │   ├── logging.py           # structlog setup
-│   │   └── middleware.py        # request-id, error handling, rate limit
+│   │   ├── middleware.py        # request-id, structured logging, metrics
+│   │   ├── limiter.py           # slowapi Limiter instance (in-memory store)
+│   │   └── exceptions.py        # AppException + Conflict/Unauthorized/NotFound/Forbidden
 │   ├── api/v1/
-│   │   ├── deps.py               # current_user, db session deps
+│   │   ├── deps.py               # current_user, db session, recipe filters deps
 │   │   └── routers/
 │   │       ├── auth.py
 │   │       ├── recipes.py
-│   │       └── health.py
-│   ├── models/                   # SQLAlchemy ORM: user.py, recipe.py, ingredient.py
-│   ├── schemas/                  # Pydantic: user.py, recipe.py, auth.py, common.py
-│   ├── repositories/             # user_repository.py, recipe_repository.py
+│   │       └── health.py         # /health/live, /health/ready, /health/metrics
+│   ├── models/                   # SQLAlchemy ORM: user.py, recipe.py (incl. RecipeIngredient), ingredient.py
+│   ├── schemas/                  # Pydantic: auth.py, recipe.py
+│   ├── repositories/             # base.py (generic BaseRepository), user_repository.py, recipe_repository.py
 │   ├── services/                 # auth_service.py, recipe_service.py
-│   └── db/                       # session.py, base.py
+│   └── db/                       # session.py, base.py, redis.py
 ├── alembic/                       # migrations
 ├── tests/
 │   ├── unit/
 │   └── integration/
-├── docker/
-│   ├── Dockerfile                 # multi-stage, non-root user
-│   ├── docker-compose.yml         # nginx, api-1, api-2, db, redis, prometheus, grafana
-│   ├── nginx/
-│   │   └── default.conf           # upstream { api-1, api-2 }, load balancing
-│   └── prometheus/
-│       └── prometheus.yml         # scrape targets: api-1:8000, api-2:8000
 ├── docs/
-│   ├── architecture.md            # this plan's diagrams, finalized
+│   ├── architecture.md            # this plan's diagrams
 │   └── adr/                        # architecture decision records
+├── .github/workflows/
+│   └── abn-amro-dev-ci.yml        # lint, type-check, pip-audit, migrate, test, docker build
+├── Dockerfile                      # multi-stage, non-root user — at project root, not docker/
+├── docker-compose.yml              # db, redis, migrate, api — single instance, at project root
 ├── .env.example
 ├── pyproject.toml
 ├── alembic.ini
 └── README.md
 ```
 
+> No `docker/` subdirectory exists — `Dockerfile` and `docker-compose.yml` live at the project root. There's also no `nginx/`, `prometheus/`, or `grafana/` config anywhere yet; see §13's status note.
+
 ---
 
 ## 13. Docker / Local Deployment
+
+> **Status: deferred, not implemented in this delivery.** The diagram and bullets below describe the originally planned multi-replica topology. What's actually running today is the single-instance setup from `docker-compose.yml` at the project root: `db`, `redis`, a `migrate` one-shot service, and one `api` service — no `nginx`, no second replica, no `prometheus`/`grafana`. See ADR-0005 for the rationale and what's needed to pick this back up.
 
 ```mermaid
 graph TB
@@ -395,7 +400,7 @@ graph TB
 
 ## 14. CI/CD (GitHub Actions)
 
-Pipeline: checkout → install deps → `ruff` lint/format check → `mypy` → unit tests → spin up Postgres+Redis service containers → integration tests → coverage report → build Docker image.
+Workflow: `.github/workflows/abn-amro-dev-ci.yml`. Postgres + Redis run as service containers for the whole job (not spun up mid-pipeline). Pipeline: checkout → install deps → `ruff` lint → `ruff format --check` → `mypy` → `pip-audit` → `alembic upgrade head` against the live Postgres service container → `pytest --cov=app` (unit and integration tests together in one run, since `testpaths = ["tests"]` covers both) → build Docker image. Coverage gate (`fail_under = 80`) is enforced via `pyproject.toml`, not a separate CI flag.
 
 ---
 
@@ -405,11 +410,12 @@ Pipeline: checkout → install deps → `ruff` lint/format check → `mypy` → 
 |---|---|
 | CI/CD pipeline (lint, type-check, tests, build) | Included |
 | DB migrations (Alembic) | Included |
-| Reverse proxy + load balancing (nginx, 2 API replicas locally) | Included |
+| Reverse proxy + load balancing (nginx, 2 API replicas locally) | **Not implemented** — designed in §13, deferred (ADR-0005) |
 | Structured JSON logging + request correlation IDs | Included |
-| Metrics (Prometheus) + dashboards (Grafana) | Included |
+| Metrics (Prometheus client) | Included — hand-rolled `Counter`/`Histogram` at `/health/metrics` |
+| Dashboards (Grafana) | **Not implemented** — no Prometheus/Grafana containers running |
 | Liveness/readiness health checks | Included |
-| Rate limiting | Included |
+| Rate limiting | Included, but in-memory store only — not yet safe across multiple replicas |
 | API versioning (`/api/v1`) | Included |
 | Pagination on list endpoint | Included |
 | Centralized error handling + consistent error schema | Included |
@@ -419,10 +425,11 @@ Pipeline: checkout → install deps → `ruff` lint/format check → `mypy` → 
 | Auto-generated API docs (Swagger/ReDoc) | Included |
 | ADRs / architecture docs | Included |
 | Test coverage thresholds | Included |
-| Graceful shutdown (SIGTERM handling via Uvicorn) | Included |
-| DB connection pooling + startup retry/backoff | Included |
-| CORS configuration | Included |
-| Security headers | Included |
+| Graceful shutdown (SIGTERM handling via Uvicorn) | Included — Uvicorn's default behavior, no extra app code needed |
+| DB connection pooling | Included — SQLAlchemy async engine default pool |
+| Startup retry/backoff for DB connection | **Not implemented** — no `tenacity`/`backoff` dependency or retry loop; `docker-compose`'s `depends_on: condition: service_healthy` covers the local Docker case but isn't an application-level guarantee |
+| CORS configuration | **Included** — `CORSMiddleware` in `app/main.py`, origins from `settings.cors_origins` |
+| Security headers | **Not implemented** — no `SecurityHeadersMiddleware` yet |
 | Backup/restore strategy doc for prod DB | Documented only (not implemented locally) |
 | Load testing (locust) | Stretch / optional |
 | Caching layer for hot read queries | Stretch / optional (Redis already present for rate-limit/blacklist, can extend) |
