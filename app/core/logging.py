@@ -29,3 +29,4 @@ def setup_logging(log_level: str = "INFO") -> None:
 
     logging.getLogger("uvicorn.access").handlers.clear()
     logging.getLogger("uvicorn").setLevel(logging.WARNING)
+    logging.getLogger("passlib").setLevel(logging.WARNING)
