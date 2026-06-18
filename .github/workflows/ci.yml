@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: recipe_user
+          POSTGRES_PASSWORD: recipe_pass
+          POSTGRES_DB: recipe_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U recipe_user -d recipe_db"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://recipe_user:recipe_pass@localhost:5432/recipe_db
+      REDIS_URL: redis://localhost:6379
+      JWT_SECRET_KEY: ci-test-secret-key-not-for-production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Format check (ruff)
+        run: ruff format --check .
+
+      - name: Type check (mypy)
+        run: mypy app
+
+      - name: Dependency vulnerability scan
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt
+
+      - name: Apply migrations
+        run: alembic upgrade head
+
+      - name: Run tests with coverage
+        run: pytest --cov=app --cov-report=term-missing
+
+      - name: Build Docker image
+        run: docker build -t recipe-manager:ci .
