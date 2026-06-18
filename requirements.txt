@@ -11,4 +11,4 @@ passlib[argon2]>=1.7.4
 redis>=5.2
 slowapi>=0.1.9
 structlog>=24.4
-prometheus-fastapi-instrumentator>=7.0
+prometheus-client>=0.20

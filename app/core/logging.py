@@ -26,3 +26,6 @@ def setup_logging(log_level: str = "INFO") -> None:
         logger_factory=structlog.PrintLoggerFactory(),
         cache_logger_on_first_use=True,
     )
+
+    logging.getLogger("uvicorn.access").handlers.clear()
+    logging.getLogger("uvicorn").setLevel(logging.WARNING)
